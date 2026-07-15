@@ -15,8 +15,11 @@ GreenKey - автоматическое удаление зелёного ИЛИ
 
 import os
 import gc
+import shutil
 import datetime
+import tempfile
 import threading
+import subprocess
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import numpy as np
@@ -216,16 +219,70 @@ def composite_checker(rgba, cell=12):
     return Image.fromarray((comp * 255).astype(np.uint8), "RGB")
 
 
+def next_dated_name(existing):
+    """Имя вида YYYY-MM-DD_NN, где NN — первый свободный (01, 02…) среди existing."""
+    date = datetime.date.today().isoformat()          # 2026-07-15
+    have = set(existing)
+    n = 1
+    while f"{date}_{n:02d}" in have:
+        n += 1
+    return f"{date}_{n:02d}"
+
+
 def make_dated_dir(parent):
     """Создать папку вывода вида <parent>\\YYYY-MM-DD_01 (при занятости — _02, _03…)."""
-    date = datetime.date.today().isoformat()          # 2026-07-15
-    n = 1
-    while True:
-        path = os.path.join(parent, f"{date}_{n:02d}")
-        if not os.path.exists(path):
-            os.makedirs(path)
-            return path
-        n += 1
+    existing = [d for d in os.listdir(parent) if os.path.isdir(os.path.join(parent, d))]
+    path = os.path.join(parent, next_dated_name(existing))
+    os.makedirs(path)
+    return path
+
+
+# ====================== ОБЛАКО ЧЕРЕЗ RCLONE ======================
+# Поддержка Яндекс.Диска и Облака Mail.ru (и любых других remote) через утилиту rclone.
+# Вход в аккаунты делает сам rclone (команда `rclone config`) — программа только копирует
+# папки туда/обратно и не хранит паролей.
+RCLONE = "rclone"                                   # ожидается в PATH
+_NO_WINDOW = 0x08000000 if os.name == "nt" else 0   # CREATE_NO_WINDOW: не мигать консолью под pythonw
+
+
+def _run_rclone(args):
+    """Запустить rclone с аргументами -> CompletedProcess (stdout/stderr как текст)."""
+    return subprocess.run([RCLONE, *args], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", creationflags=_NO_WINDOW)
+
+
+def rclone_available():
+    """Установлен ли rclone (есть ли в PATH)."""
+    try:
+        return _run_rclone(["version"]).returncode == 0
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def rclone_listremotes():
+    """Список настроенных remote (['yandex:', 'mailru:', …]) или []."""
+    try:
+        r = _run_rclone(["listremotes"])
+        return [x.strip() for x in r.stdout.splitlines() if x.strip()]
+    except (FileNotFoundError, OSError):
+        return []
+
+
+def rclone_list_dirs(remote_path):
+    """Имена подпапок в remote_path (для нумерации датированной папки на облаке)."""
+    r = _run_rclone(["lsf", "--dirs-only", remote_path])
+    if r.returncode != 0:
+        return []
+    return [d.rstrip("/") for d in r.stdout.splitlines() if d.strip()]
+
+
+def rclone_img_includes():
+    """--include аргументы rclone для картинок (оба регистра расширения)."""
+    args = []
+    for e in IMG_EXT:
+        ext = e[1:]
+        args += ["--include", f"*.{ext}", "--include", f"*.{ext.upper()}"]
+    return args
 
 
 # ====================== GUI (минимальный, без настроек) ======================
@@ -289,6 +346,23 @@ class App:
         self.prog.pack(fill="x", pady=(6, 0))
         ttk.Label(batch, text="Выберите папку с картинками —\nпрограмма сама уберёт зелёный/\nсиний фон и сложит PNG в новую\nпапку с датой (…_01).",
                   foreground="#666").pack(anchor="w", pady=(4, 0))
+
+        cloud = ttk.LabelFrame(left, text="Облако (rclone): Яндекс/Mail.ru", padding=8)
+        cloud.pack(fill="x", pady=(0, 6))
+        ttk.Label(cloud, text="Папка-источник (remote:путь):").pack(anchor="w")
+        self.cloud_src = ttk.Entry(cloud)
+        self.cloud_src.pack(fill="x")
+        self.cloud_src.insert(0, "yandex:")
+        self.cloud_link = tk.BooleanVar(value=True)
+        ttk.Checkbutton(cloud, text="дать ссылку на результат",
+                        variable=self.cloud_link).pack(anchor="w", pady=(2, 0))
+        self.cloud_btn = ttk.Button(cloud, text="Облако → вырезать всё",
+                                    command=self.cloud_folder_auto)
+        self.cloud_btn.pack(fill="x", pady=(4, 0))
+        remotes = rclone_listremotes()
+        hint = ("Настроено: " + " ".join(remotes)) if remotes else \
+            "rclone не найден. Установите rclone.org\nи выполните: rclone config"
+        ttk.Label(cloud, text=hint, foreground="#666", wraplength=200).pack(anchor="w", pady=(2, 0))
 
         info = ttk.LabelFrame(left, text="Определённый фон", padding=8)
         info.pack(fill="x", pady=4)
@@ -646,6 +720,123 @@ class App:
                 msg += f"\n…и ещё {len(errs) - 8}"
         self.status.config(text=f"Пакет завершён: {n}/{total} → {out_dir}")
         messagebox.showinfo("Пакетная обработка", msg)
+
+    # ---------- облако (rclone): Яндекс.Диск / Облако Mail.ru ----------
+    def _ui(self, fn):
+        """Выполнить обновление виджета в главном потоке (Tk не потокобезопасен)."""
+        self.root.after(0, fn)
+
+    def cloud_folder_auto(self):
+        """Скачать папку из облака по rclone, убрать фон, залить результат обратно
+        в датированную папку и (по галочке) выдать публичную ссылку."""
+        if self._batch_running:
+            return
+        src = self.cloud_src.get().strip().rstrip("/")
+        if ":" not in src or not src.split(":", 1)[1]:
+            messagebox.showinfo("Облако",
+                                "Укажите папку вида  remote:путь\n"
+                                "Например:  yandex:Принты   или   mailru:foto")
+            return
+        if not rclone_available():
+            messagebox.showerror(
+                "rclone не найден",
+                "Не найден rclone.\n\n"
+                "1) Скачайте с rclone.org/downloads (положите rclone.exe в PATH)\n"
+                "2) Настройте аккаунты:  rclone config  (yandex / mailru)\n"
+                "3) Проверьте:  rclone listremotes")
+            return
+        self._batch_running = True
+        self.cloud_btn.config(state="disabled", text="Работаю с облаком…")
+        self.batch_btn.config(state="disabled")
+        self.prog.config(value=0)
+        threading.Thread(target=self._cloud_worker,
+                         args=(src, self.cloud_link.get()), daemon=True).start()
+
+    def _cloud_worker(self, src, want_link):
+        tmp = tempfile.mkdtemp(prefix="greenkey_")
+        tmp_in = os.path.join(tmp, "in")
+        tmp_out = os.path.join(tmp, "out")
+        os.makedirs(tmp_in)
+        os.makedirs(tmp_out)
+        try:
+            # --- 1) скачать картинки из облака (только верхний уровень) ---
+            self._ui(lambda: self.status.config(text=f"Облако: скачивание из {src}…"))
+            r = _run_rclone(["copy", src, tmp_in, "--max-depth", "1", *rclone_img_includes()])
+            if r.returncode != 0:
+                raise RuntimeError(r.stderr.strip() or "не удалось скачать (rclone copy)")
+            files = sorted(os.path.join(tmp_in, f) for f in os.listdir(tmp_in)
+                           if f.lower().endswith(IMG_EXT)
+                           and os.path.isfile(os.path.join(tmp_in, f)))
+            if not files:
+                self._ui(lambda: (self._cloud_reset(),
+                                  self.status.config(text="Облако: картинок не найдено"),
+                                  messagebox.showinfo("Облако",
+                                                      f"В папке {src} нет картинок.")))
+                return
+            # --- 2) убрать фон локально ---
+            total = len(files)
+            n = 0
+            errs = []
+            self._ui(lambda: self.prog.config(maximum=total, value=0))
+            for i, f in enumerate(files, 1):
+                name = os.path.basename(f)
+                try:
+                    img = Image.open(f).convert("RGB")
+                    out, _, _ = process(img)
+                    stem = os.path.splitext(name)[0]
+                    out.save(os.path.join(tmp_out, stem + "_key.png"), compress_level=3)
+                    n += 1
+                    del img, out
+                except Exception as e:
+                    errs.append(f"{name}: {e}")
+                if i % 4 == 0:
+                    gc.collect()
+                self._ui(lambda i=i, name=name: (
+                    self.prog.config(value=i),
+                    self.status.config(text=f"Облако: обработка {i}/{total} — {name}")))
+            gc.collect()
+            if n == 0:
+                raise RuntimeError("ни одной картинки не удалось обработать")
+            # --- 3) залить результат в датированную папку облака ---
+            self._ui(lambda: self.status.config(text="Облако: загрузка результата…"))
+            dest = f"{src}/{next_dated_name(rclone_list_dirs(src))}"
+            r2 = _run_rclone(["copy", tmp_out, dest])
+            if r2.returncode != 0:
+                raise RuntimeError(r2.stderr.strip() or "не удалось загрузить (rclone copy)")
+            link = ""
+            if want_link:
+                rl = _run_rclone(["link", dest])
+                if rl.returncode == 0:
+                    link = rl.stdout.strip()
+            self._ui(lambda: self._cloud_done(n, total, dest, link, errs))
+        except Exception as e:
+            msg = str(e)
+            self._ui(lambda: self._cloud_error(msg))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _cloud_reset(self):
+        self._batch_running = False
+        self.cloud_btn.config(state="normal", text="Облако → вырезать всё")
+        self.batch_btn.config(state="normal")
+        self.prog.config(value=0)
+
+    def _cloud_done(self, n, total, dest, link, errs=()):
+        self._cloud_reset()
+        msg = f"Готово: {n} из {total} картинок.\n\nВыгружено в облако:\n{dest}"
+        if link:
+            msg += f"\n\nСсылка на результат:\n{link}"
+        if errs:
+            msg += "\n\nНе удалось:\n" + "\n".join(list(errs)[:6])
+            if len(errs) > 6:
+                msg += f"\n…и ещё {len(errs) - 6}"
+        self.status.config(text=f"Облако готово: {n}/{total} → {dest}")
+        messagebox.showinfo("Облако", msg)
+
+    def _cloud_error(self, msg):
+        self._cloud_reset()
+        self.status.config(text="Облако: ошибка")
+        messagebox.showerror("Облако (rclone)", "Не удалось:\n" + msg)
 
 
 def main():
