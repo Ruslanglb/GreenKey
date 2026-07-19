@@ -25,6 +25,11 @@ from tkinter import ttk, filedialog, messagebox
 import numpy as np
 from PIL import Image, ImageTk, ImageFilter
 
+try:
+    import yandex_disk as ya           # вход в Я.Диск по аккаунту (OAuth) + работа с папками
+except Exception:                       # модуль рядом с GreenKey.py; если нет — панель Я.Диска скрыта
+    ya = None
+
 OUTPUT_DIR = r"E:\BG"
 IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
 PREVIEW_MAX = 900
@@ -363,6 +368,9 @@ class App:
         hint = ("Настроено: " + " ".join(remotes)) if remotes else \
             "rclone не найден. Установите rclone.org\nи выполните: rclone config"
         ttk.Label(cloud, text=hint, foreground="#666", wraplength=200).pack(anchor="w", pady=(2, 0))
+
+        if ya is not None:
+            self._build_yadisk(left)
 
         info = ttk.LabelFrame(left, text="Определённый фон", padding=8)
         info.pack(fill="x", pady=4)
@@ -837,6 +845,201 @@ class App:
         self._cloud_reset()
         self.status.config(text="Облако: ошибка")
         messagebox.showerror("Облако (rclone)", "Не удалось:\n" + msg)
+
+    # ---------- Яндекс.Диск: вход в аккаунт + ссылка вход/выход ----------
+    def _build_yadisk(self, parent):
+        cfg = ya.load_config()
+        fr = ttk.LabelFrame(parent, text="Яндекс.Диск (вход в аккаунт)", padding=8)
+        fr.pack(fill="x", pady=(0, 6))
+
+        self.ya_status = ttk.Label(fr, text="—", foreground="#666", wraplength=200)
+        self.ya_status.pack(anchor="w")
+        self.ya_btn = ttk.Button(fr, text="Войти в Яндекс", command=self.ya_login)
+        self.ya_btn.pack(fill="x", pady=(2, 4))
+
+        api = ttk.Frame(fr)
+        api.pack(fill="x")
+        ttk.Label(api, text="ClientID / secret приложения:",
+                  foreground="#888").pack(anchor="w")
+        self.ya_cid = ttk.Entry(api)
+        self.ya_cid.pack(fill="x")
+        self.ya_cid.insert(0, cfg.get("client_id", ""))
+        self.ya_secret = ttk.Entry(api, show="•")
+        self.ya_secret.pack(fill="x", pady=(2, 4))
+        self.ya_secret.insert(0, cfg.get("client_secret", ""))
+
+        ttk.Label(fr, text="Папка-вход (ссылка или /путь):").pack(anchor="w")
+        self.ya_src = ttk.Entry(fr)
+        self.ya_src.pack(fill="x")
+        ttk.Label(fr, text="Папка-выход (путь на Диске, напр. /Готово):").pack(anchor="w", pady=(4, 0))
+        self.ya_dst = ttk.Entry(fr)
+        self.ya_dst.pack(fill="x")
+        self.ya_dst.insert(0, "/GreenKey")
+        self.ya_link = tk.BooleanVar(value=True)
+        ttk.Checkbutton(fr, text="дать ссылку на результат",
+                        variable=self.ya_link).pack(anchor="w", pady=(2, 0))
+        self.ya_go = ttk.Button(fr, text="Я.Диск: вход → выход",
+                                command=self.ya_process)
+        self.ya_go.pack(fill="x", pady=(4, 0))
+
+        self._ya_update_status(cfg)
+
+    def _ya_update_status(self, cfg=None):
+        cfg = cfg if cfg is not None else ya.load_config()
+        if ya.is_logged_in(cfg):
+            name = ya.account_login(cfg) or "аккаунт"
+            self.ya_status.config(text=f"Вошли: {name}", foreground="#198754")
+            self.ya_btn.config(text="Сменить аккаунт")
+        else:
+            self.ya_status.config(text="Вход не выполнен", foreground="#666")
+            self.ya_btn.config(text="Войти в Яндекс")
+
+    def ya_login(self):
+        if self._batch_running:
+            return
+        cid = self.ya_cid.get().strip()
+        secret = self.ya_secret.get().strip()
+        if not cid or not secret:
+            messagebox.showinfo(
+                "Вход в Яндекс",
+                "Сначала зарегистрируйте приложение (один раз, ~2 мин):\n\n"
+                "1) https://oauth.yandex.ru/client/new\n"
+                "2) Платформа «Веб-сервисы», Redirect URI:  http://localhost:8123\n"
+                "3) Доступы: Яндекс.Диск REST API — чтение, запись, инфо; и «Доступ к логину».\n"
+                "4) Скопируйте ClientID и Client secret в поля программы.")
+            return
+        self._batch_running = True
+        self.ya_btn.config(state="disabled", text="Открываю браузер…")
+        self.status.config(text="Яндекс: подтвердите доступ в браузере…")
+        threading.Thread(target=self._ya_login_worker, args=(cid, secret),
+                         daemon=True).start()
+
+    def _ya_login_worker(self, cid, secret):
+        try:
+            cfg = ya.oauth_login(cid, secret)
+            self._ui(lambda: (self._ya_finish_login(True, ""), self._ya_update_status(cfg)))
+        except Exception as e:
+            msg = str(e)
+            self._ui(lambda: self._ya_finish_login(False, msg))
+
+    def _ya_finish_login(self, ok, msg):
+        self._batch_running = False
+        self.ya_btn.config(state="normal")
+        if ok:
+            self.status.config(text="Яндекс: вход выполнен")
+        else:
+            self._ya_update_status()
+            self.status.config(text="Яндекс: вход не выполнен")
+            messagebox.showerror("Вход в Яндекс", "Не удалось войти:\n" + msg)
+
+    def ya_process(self):
+        if self._batch_running:
+            return
+        if not ya.is_logged_in():
+            messagebox.showinfo("Яндекс.Диск", "Сначала войдите в аккаунт.")
+            return
+        src_text = self.ya_src.get().strip()
+        dst_text = self.ya_dst.get().strip()
+        if not src_text or not dst_text:
+            messagebox.showinfo("Яндекс.Диск",
+                                "Укажите папку-вход (ссылка или /путь) и папку-выход (/путь).")
+            return
+        self._batch_running = True
+        self.ya_go.config(state="disabled", text="Работаю…")
+        self.ya_btn.config(state="disabled")
+        self.prog.config(value=0)
+        threading.Thread(target=self._ya_worker,
+                         args=(src_text, dst_text, self.ya_link.get()), daemon=True).start()
+
+    def _ya_worker(self, src_text, dst_text, want_link):
+        tmp = tempfile.mkdtemp(prefix="greenkey_ya_")
+        tmp_in = os.path.join(tmp, "in")
+        tmp_out = os.path.join(tmp, "out")
+        os.makedirs(tmp_in)
+        os.makedirs(tmp_out)
+        try:
+            cfg = ya.refresh_if_needed(ya.load_config())
+            source = ya.parse_source(src_text)
+            dest_base = ya.norm_dest(dst_text)
+
+            # 1) список картинок во входной папке
+            self._ui(lambda: self.status.config(text="Я.Диск: чтение входной папки…"))
+            items = ya.list_images(source, cfg)
+            if not items:
+                self._ui(lambda: (self._ya_reset(),
+                                  self.status.config(text="Я.Диск: картинок не найдено"),
+                                  messagebox.showinfo("Яндекс.Диск", "Во входной папке нет картинок.")))
+                return
+
+            # 2) скачать + убрать фон
+            total = len(items)
+            n = 0
+            errs = []
+            self._ui(lambda: self.prog.config(maximum=total, value=0))
+            for i, it in enumerate(items, 1):
+                name = it["name"]
+                try:
+                    local_in = os.path.join(tmp_in, name)
+                    ya.download(it, local_in, cfg)
+                    img = Image.open(local_in).convert("RGB")
+                    out, _, _ = process(img)
+                    stem = os.path.splitext(name)[0]
+                    out.save(os.path.join(tmp_out, stem + "_key.png"), compress_level=3)
+                    n += 1
+                    del img, out
+                    try:
+                        os.remove(local_in)
+                    except OSError:
+                        pass
+                except Exception as e:
+                    errs.append(f"{name}: {e}")
+                if i % 4 == 0:
+                    gc.collect()
+                self._ui(lambda i=i, name=name: (
+                    self.prog.config(value=i),
+                    self.status.config(text=f"Я.Диск: обработка {i}/{total} — {name}")))
+            gc.collect()
+            if n == 0:
+                raise RuntimeError("ни одной картинки не удалось обработать")
+
+            # 3) залить результат в датированную подпапку выходной папки
+            self._ui(lambda: self.status.config(text="Я.Диск: загрузка результата…"))
+            ya.ensure_folder(dest_base, cfg)
+            dated = next_dated_name(ya.list_dir_names(dest_base, cfg))
+            final_dest = dest_base + "/" + dated
+            ya.ensure_folder(final_dest, cfg)
+            for f in sorted(os.listdir(tmp_out)):
+                ya.upload(os.path.join(tmp_out, f), final_dest + "/" + f, cfg)
+            link = ya.publish(final_dest, cfg) if want_link else ""
+            self._ui(lambda: self._ya_done(n, total, final_dest, link, errs))
+        except Exception as e:
+            msg = str(e)
+            self._ui(lambda: self._ya_error(msg))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _ya_reset(self):
+        self._batch_running = False
+        self.ya_go.config(state="normal", text="Я.Диск: вход → выход")
+        self.ya_btn.config(state="normal")
+        self.prog.config(value=0)
+
+    def _ya_done(self, n, total, dest, link, errs=()):
+        self._ya_reset()
+        msg = f"Готово: {n} из {total} картинок.\n\nВыгружено на Я.Диск:\n{dest}"
+        if link:
+            msg += f"\n\nСсылка на результат:\n{link}"
+        if errs:
+            msg += "\n\nНе удалось:\n" + "\n".join(list(errs)[:6])
+            if len(errs) > 6:
+                msg += f"\n…и ещё {len(errs) - 6}"
+        self.status.config(text=f"Я.Диск готово: {n}/{total} → {dest}")
+        messagebox.showinfo("Яндекс.Диск", msg)
+
+    def _ya_error(self, msg):
+        self._ya_reset()
+        self.status.config(text="Я.Диск: ошибка")
+        messagebox.showerror("Яндекс.Диск", "Не удалось:\n" + msg)
 
 
 def main():
