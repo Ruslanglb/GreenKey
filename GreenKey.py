@@ -40,8 +40,12 @@ PREVIEW_MAX = 900
 SCREEN_COLOUR_GREEN = (11 / 255., 163 / 255., 77 / 255.)   # Green.ffx: RGB 11,163,77
 SCREEN_COLOUR_BLUE = (0 / 255., 89 / 255., 255 / 255.)     # blue.ffx:  RGB 0,89,255
 SCREEN_COLOUR = SCREEN_COLOUR_GREEN  # значение по умолчанию (зелёный)
-CLIP_BLACK = 0.09       # Clip Black = 9  (matte < 9%  -> 0)  (одинаково для обоих)
+CLIP_BLACK = 0.09       # Clip Black = 9  (matte < 9%  -> 0)  — для ЗЕЛЁНОГО
 CLIP_WHITE = 0.76       # Clip White = 76 (matte > 76% -> 1)  (одинаково для обоих)
+# Для СИНЕГО клип чёрного выше: у синего экрана заметен зелёный и высокий контраст с
+# тёмными объектами (чёрный текст) даёт широкую полупрозрачную серую дымку по краям.
+# Более высокий порог убирает эту дымку (текст/края чёткие), не съедая объект.
+CLIP_BLACK_BLUE = 0.30
 # --- Синий кей: защита пурпура/маджента/фиолета -------------------------------------
 # Фиолет/пурпур — это magenta-семейство: И красный, И синий выше зелёного (min(R,B) > G).
 # У синего фона и у сине-СЕРЫХ краёв (напр. лучи звёзд, где G≈R) так не бывает — их НЕ
@@ -221,7 +225,8 @@ def _screen_matte(R, G, B, S, key):
     k = max(float(S[key] - max(S[(key + 1) % 3], S[(key + 2) % 3])), 1e-3)  # «чистота» экрана
     screen = np.clip(dom / k, 0.0, 1.0)               # доля экрана
     m = 1.0 - screen
-    return np.clip((m - CLIP_BLACK) / (CLIP_WHITE - CLIP_BLACK), 0.0, 1.0)
+    cb = CLIP_BLACK_BLUE if key == 2 else CLIP_BLACK  # у синего порог выше (убрать серую дымку)
+    return np.clip((m - cb) / (CLIP_WHITE - cb), 0.0, 1.0)
 
 
 def composite_checker(rgba, cell=12):
