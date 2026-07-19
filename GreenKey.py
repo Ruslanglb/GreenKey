@@ -854,8 +854,12 @@ class App:
 
         self.ya_status = ttk.Label(fr, text="—", foreground="#666", wraplength=200)
         self.ya_status.pack(anchor="w")
-        self.ya_btn = ttk.Button(fr, text="Войти в Яндекс", command=self.ya_login)
-        self.ya_btn.pack(fill="x", pady=(2, 4))
+        btns = ttk.Frame(fr)
+        btns.pack(fill="x", pady=(2, 4))
+        self.ya_qr_btn = ttk.Button(btns, text="Войти по QR", command=self.ya_login_qr)
+        self.ya_qr_btn.pack(side="left", fill="x", expand=True)
+        self.ya_btn = ttk.Button(btns, text="в браузере", width=11, command=self.ya_login)
+        self.ya_btn.pack(side="left", padx=(4, 0))
 
         api = ttk.Frame(fr)
         api.pack(fill="x")
@@ -889,14 +893,18 @@ class App:
         if ya.is_logged_in(cfg):
             name = ya.account_login(cfg) or "аккаунт"
             self.ya_status.config(text=f"Вошли: {name}", foreground="#198754")
-            self.ya_btn.config(text="Сменить аккаунт")
         else:
             self.ya_status.config(text="Вход не выполнен", foreground="#666")
-            self.ya_btn.config(text="Войти в Яндекс")
 
-    def ya_login(self):
-        if self._batch_running:
-            return
+    def _ya_login_buttons(self, state):
+        """Включить/выключить кнопки входа и запуска Я.Диска разом."""
+        for name in ("ya_qr_btn", "ya_btn", "ya_go"):
+            b = getattr(self, name, None)
+            if b is not None:
+                b.config(state=state)
+
+    def _ya_creds_or_prompt(self):
+        """Вернуть (client_id, secret) или None (показав инструкцию по регистрации)."""
         cid = self.ya_cid.get().strip()
         secret = self.ya_secret.get().strip()
         if not cid or not secret:
@@ -904,15 +912,107 @@ class App:
                 "Вход в Яндекс",
                 "Сначала зарегистрируйте приложение (один раз, ~2 мин):\n\n"
                 "1) https://oauth.yandex.ru/client/new\n"
-                "2) Платформа «Веб-сервисы», Redirect URI:  http://localhost:8123\n"
+                "2) Платформа «Веб-сервисы». В Redirect URI добавьте ОБА адреса:\n"
+                "     http://localhost:8123\n"
+                "     https://oauth.yandex.ru/verification_code   (нужен для входа по QR)\n"
                 "3) Доступы: Яндекс.Диск REST API — чтение, запись, инфо; и «Доступ к логину».\n"
                 "4) Скопируйте ClientID и Client secret в поля программы.")
+            return None
+        return cid, secret
+
+    def ya_login(self):
+        if self._batch_running:
             return
+        creds = self._ya_creds_or_prompt()
+        if not creds:
+            return
+        cid, secret = creds
         self._batch_running = True
-        self.ya_btn.config(state="disabled", text="Открываю браузер…")
+        self._ya_login_buttons("disabled")
+        self.ya_btn.config(text="Открываю…")
         self.status.config(text="Яндекс: подтвердите доступ в браузере…")
         threading.Thread(target=self._ya_login_worker, args=(cid, secret),
                          daemon=True).start()
+
+    def ya_login_qr(self):
+        if self._batch_running:
+            return
+        creds = self._ya_creds_or_prompt()
+        if not creds:
+            return
+        cid, secret = creds
+        try:
+            import segno  # noqa: F401 — проверка наличия
+        except ImportError:
+            messagebox.showerror(
+                "Вход по QR",
+                "Не установлена библиотека для QR.\n\nВыполните в командной строке:\n"
+                "    pip install segno\n\nЛибо войдите кнопкой «в браузере».")
+            return
+        try:
+            url = ya.authorize_url_oob(cid)
+        except Exception as e:
+            messagebox.showerror("Вход по QR", str(e))
+            return
+        self._ya_show_qr(url, cid, secret)
+
+    def _ya_show_qr(self, url, cid, secret):
+        import io
+        import segno
+        win = tk.Toplevel(self.root)
+        win.title("Вход в Яндекс по QR")
+        win.transient(self.root)
+        win.resizable(False, False)
+        ttk.Label(win, justify="left",
+                  text="1) Наведите камеру телефона (или Яндекс) на QR\n"
+                       "2) Войдите и подтвердите доступ\n"
+                       "3) Введите показанный код подтверждения ниже").pack(
+            padx=14, pady=(14, 8))
+        qr = segno.make(url, error="m")
+        buf = io.BytesIO()
+        qr.save(buf, kind="png", scale=6, border=2)
+        buf.seek(0)
+        self._qr_img = ImageTk.PhotoImage(Image.open(buf))   # держим ссылку
+        tk.Label(win, image=self._qr_img).pack(padx=14)
+        ttk.Label(win, text="Не сканируется? Откройте ссылку вручную:",
+                  foreground="#666").pack(anchor="w", padx=14, pady=(8, 0))
+        link = ttk.Entry(win)
+        link.pack(fill="x", padx=14)
+        link.insert(0, url)
+        link.config(state="readonly")
+        row = ttk.Frame(win)
+        row.pack(fill="x", padx=14, pady=12)
+        ttk.Label(row, text="Код:").pack(side="left")
+        code_e = ttk.Entry(row, width=14)
+        code_e.pack(side="left", padx=6)
+        code_e.focus_set()
+
+        def submit():
+            code = code_e.get().strip()
+            if not code:
+                return
+            win.destroy()
+            self._batch_running = True
+            self._ya_login_buttons("disabled")
+            self.status.config(text="Яндекс: проверяю код…")
+            threading.Thread(target=self._ya_code_worker,
+                             args=(cid, secret, code), daemon=True).start()
+
+        ttk.Button(row, text="Готово", command=submit).pack(side="left")
+        code_e.bind("<Return>", lambda e: submit())
+        try:
+            win.update_idletasks()
+            win.grab_set()          # модальность; может не сработать до отрисовки — не критично
+        except tk.TclError:
+            pass
+
+    def _ya_code_worker(self, cid, secret, code):
+        try:
+            cfg = ya.exchange_code(cid, secret, code)
+            self._ui(lambda: (self._ya_finish_login(True, ""), self._ya_update_status(cfg)))
+        except Exception as e:
+            msg = str(e)
+            self._ui(lambda: self._ya_finish_login(False, msg))
 
     def _ya_login_worker(self, cid, secret):
         try:
@@ -924,7 +1024,8 @@ class App:
 
     def _ya_finish_login(self, ok, msg):
         self._batch_running = False
-        self.ya_btn.config(state="normal")
+        self._ya_login_buttons("normal")
+        self.ya_btn.config(text="в браузере")
         if ok:
             self.status.config(text="Яндекс: вход выполнен")
         else:
@@ -945,8 +1046,8 @@ class App:
                                 "Укажите папку-вход (ссылка или /путь) и папку-выход (/путь).")
             return
         self._batch_running = True
-        self.ya_go.config(state="disabled", text="Работаю…")
-        self.ya_btn.config(state="disabled")
+        self._ya_login_buttons("disabled")
+        self.ya_go.config(text="Работаю…")
         self.prog.config(value=0)
         threading.Thread(target=self._ya_worker,
                          args=(src_text, dst_text, self.ya_link.get()), daemon=True).start()
@@ -1020,8 +1121,8 @@ class App:
 
     def _ya_reset(self):
         self._batch_running = False
-        self.ya_go.config(state="normal", text="Я.Диск: вход → выход")
-        self.ya_btn.config(state="normal")
+        self._ya_login_buttons("normal")
+        self.ya_go.config(text="Я.Диск: вход → выход")
         self.prog.config(value=0)
 
     def _ya_done(self, n, total, dest, link, errs=()):

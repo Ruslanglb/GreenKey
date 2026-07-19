@@ -163,6 +163,49 @@ def oauth_login(client_id, client_secret, timeout=180):
     return cfg
 
 
+OOB_REDIRECT = "https://oauth.yandex.ru/verification_code"
+
+
+def authorize_url_oob(client_id):
+    """URL авторизации для входа по QR/коду подтверждения (redirect = verification_code)."""
+    client_id = (client_id or "").strip()
+    if not client_id:
+        raise YaError("Укажите ClientID приложения Яндекса.")
+    return (f"{OAUTH_AUTH}?response_type=code&client_id={urllib.parse.quote(client_id)}"
+            f"&redirect_uri={urllib.parse.quote(OOB_REDIRECT)}&force_confirm=yes")
+
+
+def exchange_code(client_id, client_secret, code):
+    """Обменять код подтверждения (введённый вручную после QR) на токен. Сохраняет конфиг."""
+    client_id = (client_id or "").strip()
+    client_secret = (client_secret or "").strip()
+    code = (code or "").strip().replace(" ", "")
+    if not (client_id and client_secret and code):
+        raise YaError("Нужны ClientID, Client secret и код подтверждения.")
+    data = urllib.parse.urlencode({
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": OOB_REDIRECT,
+    }).encode("utf-8")
+    _, body = _request("POST", OAUTH_TOKEN, data=data,
+                       headers={"Content-Type": "application/x-www-form-urlencoded"})
+    tok = json.loads(body.decode("utf-8"))
+    if "access_token" not in tok:
+        raise YaError(f"Не получен токен: {tok}")
+    cfg = load_config()
+    cfg.update({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "access_token": tok["access_token"],
+        "refresh_token": tok.get("refresh_token", ""),
+        "expires_at": time.time() + int(tok.get("expires_in", 0)),
+    })
+    save_config(cfg)
+    return cfg
+
+
 def refresh_if_needed(cfg):
     """Обновить access_token по refresh_token, если срок близок. Возвращает cfg."""
     if not cfg.get("refresh_token"):
