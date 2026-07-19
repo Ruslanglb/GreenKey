@@ -42,6 +42,12 @@ SCREEN_COLOUR_BLUE = (0 / 255., 89 / 255., 255 / 255.)     # blue.ffx:  RGB 0,89
 SCREEN_COLOUR = SCREEN_COLOUR_GREEN  # значение по умолчанию (зелёный)
 CLIP_BLACK = 0.09       # Clip Black = 9  (matte < 9%  -> 0)  (одинаково для обоих)
 CLIP_WHITE = 0.76       # Clip White = 76 (matte > 76% -> 1)  (одинаково для обоих)
+# --- Синий кей: защита пурпура/маджента/фиолета -------------------------------------
+# Фиолет/пурпур — это magenta-семейство: И красный, И синий выше зелёного (min(R,B) > G).
+# У синего фона и у сине-СЕРЫХ краёв (напр. лучи звёзд, где G≈R) так не бывает — их НЕ
+# трогаем, поэтому синей каймы по краям не появляется. Действует только на синий режим.
+BLUE_MAGENTA_MARGIN = 0.06   # с какого превышения min(R,B) над G начинаем защищать
+BLUE_MAGENTA_SOFT = 0.15     # мягкость перехода защиты (больше -> плавнее)
 # Advanced Spill Suppressor (Method = Standard):
 SPILL_SUPPRESSION = 1.00  # Suppression = 100
 DECON_MIN = 0.4           # ограничение знаменателя деконтаминации
@@ -142,7 +148,7 @@ def process(pil_rgb, override_bg=None, preview=False):
     # -------- 2) ADVANCED SPILL SUPPRESSOR --------
     # dom  — доминирование ключевого канала (зелёного или синего) над двумя другими;
     # avg  — среднее двух НЕключевых каналов (для зелёного = (R+B)/2, для синего = (R+G)/2).
-    dom = _key_dom(R, G, B, key)          # >0 только где ключевой цвет доминирует
+    dom = _key_dom(R, G, B, key, S)       # >0 только где ключевой цвет доминирует
     other_avg = 0.5 * (R + B) if key == 1 else 0.5 * (R + G)
     keyish = dom > 0.0
     # Гибрид по яркости пикселя:
@@ -170,10 +176,16 @@ def process(pil_rgb, override_bg=None, preview=False):
     return out, tuple(int(x * 255) for x in S), key
 
 
-def _key_dom(R, G, B, key):
-    """Доминирование ключевого канала над двумя другими (>0 = фон). key: 1=зелёный, 2=синий."""
+def _key_dom(R, G, B, key, S=None):
+    """Доминирование ключевого канала над двумя другими (>0 = фон). key: 1=зелёный, 2=синий.
+    Для синего (key=2) при заданном S гасим кей на пурпуре/фиолете (там красного больше, чем в фоне)."""
     if key == 2:
-        return B - np.maximum(R, G)
+        dom = B - np.maximum(R, G)
+        # guard: гасим кей на magenta-семействе (min(R,B) заметно выше G) — фиолет/пурпур/маджента.
+        # Сине-серые края (G≈R) и чистый синий фон при этом не защищаются -> нет синей каймы.
+        magenta = np.minimum(R, B) - G
+        guard = np.clip((magenta - BLUE_MAGENTA_MARGIN) / max(BLUE_MAGENTA_SOFT, 1e-3), 0.0, 1.0)
+        return dom * (1.0 - guard)
     return G - np.maximum(R, B)
 
 
@@ -205,7 +217,7 @@ def _fast_erode(aimg, r):
 
 def _screen_matte(R, G, B, S, key):
     """Keylight screen matte -> alpha (1=объект, 0=фон). R,G,B,S в 0..1. key: 1=зел., 2=син."""
-    dom = _key_dom(R, G, B, key)                      # >0 только где ключевой цвет доминирует
+    dom = _key_dom(R, G, B, key, S)                   # >0 только где ключевой цвет доминирует
     k = max(float(S[key] - max(S[(key + 1) % 3], S[(key + 2) % 3])), 1e-3)  # «чистота» экрана
     screen = np.clip(dom / k, 0.0, 1.0)               # доля экрана
     m = 1.0 - screen
