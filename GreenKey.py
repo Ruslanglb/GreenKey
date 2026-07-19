@@ -655,7 +655,7 @@ class App:
         if not path:
             return
         out, _, _ = process(self.src, self.override_bg)
-        out.save(path)
+        out.save(path, compress_level=0)   # PNG без сжатия
         self.status.config(text="Сохранено: " + path)
 
     def save_all(self):
@@ -667,7 +667,7 @@ class App:
             try:
                 img = Image.open(f).convert("RGB")
                 out, _, _ = process(img)   # каждая картинка — свой авто-фон (зел./син.)
-                out.save(self._out_path(f), compress_level=3)
+                out.save(self._out_path(f), compress_level=0)
                 n += 1
                 del img, out
                 if n % 4 == 0:
@@ -713,8 +713,8 @@ class App:
                 out, _, key = process(img)          # авто-детект зелёный/синий на каждую
                 kind = "синий" if key == 2 else "зелёный"
                 stem = os.path.splitext(name)[0]
-                # compress_level=3 -> быстрее кодирование PNG (без потери качества)
-                out.save(os.path.join(out_dir, stem + "_key.png"), compress_level=3)
+                # compress_level=0 -> PNG вообще без сжатия (пиксели те же, файл крупнее)
+                out.save(os.path.join(out_dir, stem + "_key.png"), compress_level=0)
                 n += 1
                 del img, out
             except Exception as e:
@@ -804,7 +804,7 @@ class App:
                     img = Image.open(f).convert("RGB")
                     out, _, _ = process(img)
                     stem = os.path.splitext(name)[0]
-                    out.save(os.path.join(tmp_out, stem + "_key.png"), compress_level=3)
+                    out.save(os.path.join(tmp_out, stem + "_key.png"), compress_level=0)
                     n += 1
                     del img, out
                 except Exception as e:
@@ -1097,7 +1097,7 @@ class App:
                     img = Image.open(local_in).convert("RGB")
                     out, _, _ = process(img)
                     stem = os.path.splitext(name)[0]
-                    out.save(os.path.join(tmp_out, stem + "_key.png"), compress_level=3)
+                    out.save(os.path.join(tmp_out, stem + "_key.png"), compress_level=0)
                     n += 1
                     del img, out
                     try:
