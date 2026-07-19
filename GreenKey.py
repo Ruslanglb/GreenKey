@@ -146,19 +146,19 @@ def process(pil_rgb, override_bg=None, preview=False):
         aimg = aimg.filter(ImageFilter.GaussianBlur(radius=ALPHA_FEATHER))
 
     # -------- 2) ADVANCED SPILL SUPPRESSOR --------
-    # dom  — доминирование ключевого канала (зелёного или синего) над двумя другими;
-    # avg  — среднее двух НЕключевых каналов (для зелёного = (R+B)/2, для синего = (R+G)/2).
     dom = _key_dom(R, G, B, key, S)       # >0 только где ключевой цвет доминирует
-    other_avg = 0.5 * (R + B) if key == 1 else 0.5 * (R + G)
     keyish = dom > 0.0
-    # Гибрид по яркости пикселя:
-    #   тёмные загрязнённые точки -> ключевой канал к среднему соседей (как navy в AE);
-    #   яркие (края белого) -> деконтаминация = чистый цвет без цветного налёта.
-    # navy-вариант (Standard suppression)
+    # navy-вариант (Standard suppression):
+    #   зелёный экран -> тянем G к (R+B)/2 (остаётся лёгкая navy, как в AE — незаметно);
+    #   синий  экран  -> тянем И G, И B к R (у синего экрана заметен зелёный, G=89 —
+    #                    если давить только синий, на краях остаётся ЗЕЛЁНЫЙ налёт).
     std = arr.copy()
-    std[..., key] = np.where(keyish,
-                             np.clip(arr[..., key] - SPILL_SUPPRESSION * (arr[..., key] - other_avg), 0.0, 1.0),
-                             arr[..., key])
+    if key == 1:
+        avg = 0.5 * (R + B)
+        std[..., 1] = np.where(keyish, np.clip(G - SPILL_SUPPRESSION * (G - avg), 0.0, 1.0), G)
+    else:
+        std[..., 1] = np.where(keyish, np.clip(G - SPILL_SUPPRESSION * (G - R), 0.0, 1.0), G)
+        std[..., 2] = np.where(keyish, np.clip(B - SPILL_SUPPRESSION * (B - R), 0.0, 1.0), B)
     # decon-вариант (вычет фона)
     k = max(float(S[key] - max(S[(key + 1) % 3], S[(key + 2) % 3])), 1e-3)
     screen = np.clip(dom / k, 0.0, 1.0)[..., None]
