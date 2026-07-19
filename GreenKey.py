@@ -70,6 +70,11 @@ PREVIEW_MAX_SIDE = 4096   # в превью ограничиваем ради с
 OUTPUT_MAX_SCALE = 4.0    # но не больше этого множителя
 CONTOUR_CHOKE_SRC = 0.8   # поджать контур на ~столько ПИКСЕЛЕЙ ИСХОДНИКА -> убрать тонкую
                           # зелёную линию по краю (край чуть Ќже, не толще)
+# LANCZOS-апскейл слегка мылит (особенно мелкий/чёткий исходник — текст, линии).
+# Компенсируем лёгким unsharp по RGB СРАЗУ после увеличения: чёткость возвращается,
+# сам апскейл (разрешение, гладкий край) не меняется.
+UPSCALE_SHARPEN = True
+SHARPEN_PERCENT = 110     # сила резкости (0 = выкл)
 
 
 # ====================== ОПРЕДЕЛЕНИЕ ТИПА И ЦВЕТА ФОНА ======================
@@ -113,6 +118,9 @@ def process(pil_rgb, override_bg=None, preview=False):
     oscale = max(1.0, min(OUTPUT_MAX_SCALE, omax / max(w0, h0)))
     if oscale > 1.001:
         pil_rgb = pil_rgb.resize((round(w0 * oscale), round(h0 * oscale)), Image.LANCZOS)
+        if UPSCALE_SHARPEN and SHARPEN_PERCENT > 0:   # вернуть чёткость, потерянную на увеличении
+            pil_rgb = pil_rgb.filter(ImageFilter.UnsharpMask(
+                radius=oscale, percent=SHARPEN_PERCENT, threshold=0))
     w, h = pil_rgb.size
     arr = np.asarray(pil_rgb, dtype=np.float32) / 255.0
     R, G, B = arr[..., 0], arr[..., 1], arr[..., 2]
