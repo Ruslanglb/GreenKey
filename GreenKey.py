@@ -359,8 +359,23 @@ class App:
         self._build()
 
     def _build(self):
-        left = ttk.Frame(self.root, padding=10)
-        left.pack(side="left", fill="y")
+        # Левая панель — прокручиваемая (виджетов много, чтобы «Сохранить» не уезжало за край)
+        left_outer = ttk.Frame(self.root)
+        left_outer.pack(side="left", fill="y")
+        lcanvas = tk.Canvas(left_outer, width=262, highlightthickness=0)
+        lscroll = ttk.Scrollbar(left_outer, orient="vertical", command=lcanvas.yview)
+        lcanvas.configure(yscrollcommand=lscroll.set)
+        lscroll.pack(side="right", fill="y")
+        lcanvas.pack(side="left", fill="y", expand=False)
+        left = ttk.Frame(lcanvas, padding=10)
+        left_win = lcanvas.create_window((0, 0), window=left, anchor="nw")
+        left.bind("<Configure>", lambda e: lcanvas.configure(scrollregion=lcanvas.bbox("all")))
+        lcanvas.bind("<Configure>", lambda e: lcanvas.itemconfig(left_win, width=e.width))
+        # колесо мыши прокручивает левую панель, когда курсор над ней (иначе — зум превью)
+        self._left_outer = left_outer
+        self._lcanvas = lcanvas
+        self.root.bind_all("<MouseWheel>", self._maybe_scroll_left, add="+")
+
         right = ttk.Frame(self.root, padding=6)
         right.pack(side="right", fill="both", expand=True)
 
@@ -666,6 +681,18 @@ class App:
         global SHARP_MODE
         SHARP_MODE = bool(self.sharp_var.get())
         self._refresh()          # пересчитать текущий кадр в новом режиме
+
+    def _maybe_scroll_left(self, e):
+        """Колесо мыши над левой панелью -> прокрутка панели (над превью — зум, там своя привязка)."""
+        w = self.root.winfo_containing(e.x_root, e.y_root)
+        while w is not None:
+            if w is self._left_outer:
+                self._lcanvas.yview_scroll(int(-(e.delta or 0) / 120), "units")
+                return
+            try:
+                w = w.master
+            except Exception:
+                return
 
     # ---------- сохранение ----------
     def choose_out(self):
